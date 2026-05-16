@@ -1,0 +1,9 @@
+config ZMK_MODIFIER_NOTIFIER
+    bool "Send modifier state changes over raw HID"
+    depends on RAW_HID
+    default n
+    help
+      Sends a 32-byte raw HID report whenever the explicit modifier state
+      changes. The packet contains the modifier bitmask (with handedness
+      preserved -- left/right ctrl/shift/alt/gui are distinct bits) so a
+      host-side script can display which modifiers are currently active.
