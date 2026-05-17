@@ -4,27 +4,33 @@
  * Sends a raw HID report whenever the explicit modifier state changes.
  *
  * Packet format (32 bytes):
- *   [0] = 0xF2  packet marker (distinct from 0xFF used by keypeek layer
- *                packets and 0xF1 used by keypeek key-position packets)
+ *   [0] = 0xF2  packet marker
  *   [1] = 1     payload length in bytes
- *   [2] = modifier bitmask:
+ *   [2] = modifier bitmask (USB HID standard, handedness preserved)
  *           bit 0: Left Ctrl   bit 4: Right Ctrl
  *           bit 1: Left Shift  bit 5: Right Shift
  *           bit 2: Left Alt    bit 6: Right Alt
  *           bit 3: Left GUI    bit 7: Right GUI
  *   [3..31] = 0
  *
- * The bitmask layout matches the standard USB HID keyboard modifier byte,
- * so left and right variants are preserved.
+ * IMPORTANT IMPLEMENTATION NOTE:
+ *   We do NOT subscribe to zmk_modifiers_state_changed -- that event struct
+ *   exists in ZMK headers but historically nothing in core ZMK actually
+ *   raises it (see ZMK issue #144). Subscribing compiles fine but the
+ *   listener never fires.
  *
- * NOTE: raise_raw_hid_sent_event is processed asynchronously by the raw_hid
- * adapter, so the data pointer must remain valid after this function returns.
- * The buffer is file-scope static (NOT stack-local) for this reason. The
- * keypeek module does the same thing for the same reason.
+ *   Instead we subscribe to zmk_keycode_state_changed (which IS raised on
+ *   every keypress) and after each event check the explicit modifier mask
+ *   via zmk_hid_get_explicit_mods(). If the mask differs from what we
+ *   last sent, we transmit a new packet.
+ *
+ *   The buffer is file-scope static because raise_raw_hid_sent_event is
+ *   processed asynchronously and the data pointer must remain valid after
+ *   our function returns.
  */
 
 #include <zmk/event_manager.h>
-#include <zmk/events/modifiers_state_changed.h>
+#include <zmk/events/keycode_state_changed.h>
 #include <zmk/hid.h>
 
 #include <raw_hid/events.h>
@@ -38,33 +44,39 @@ LOG_MODULE_DECLARE(zmk, CONFIG_ZMK_LOG_LEVEL);
 
 #define MODNOTIF_PACKET_MARKER 0xF2
 
-/* File-scope buffer — must persist after send_modifier_state returns because
- * raise_raw_hid_sent_event is consumed asynchronously by the raw_hid adapter. */
+/* Persistent buffer -- see note above. */
 static uint8_t hid_buf[CONFIG_RAW_HID_REPORT_SIZE];
 
-static void send_modifier_state(void) {
-    /* zmk_hid_get_explicit_mods() returns the standard USB HID modifier byte
-     * with handedness preserved. */
-    zmk_mod_flags_t mods = zmk_hid_get_explicit_mods();
+/* Last sent mask; used to suppress duplicate packets when non-modifier keys change. */
+static uint8_t last_sent_mods = 0xFF;   /* Impossible value forces first send */
 
+static void send_modifier_state(uint8_t mods) {
     memset(hid_buf, 0, sizeof(hid_buf));
     hid_buf[0] = MODNOTIF_PACKET_MARKER;
     hid_buf[1] = 1;
-    hid_buf[2] = (uint8_t)mods;
+    hid_buf[2] = mods;
 
     LOG_DBG("Modifier notifier: mods=0x%02x", mods);
 
     raise_raw_hid_sent_event((struct raw_hid_sent_event){.data = hid_buf, .length = sizeof(hid_buf)});
 }
 
-static int modifiers_state_changed_listener(const zmk_event_t *eh) {
-    const struct zmk_modifiers_state_changed *ev = as_zmk_modifiers_state_changed(eh);
+static int keycode_state_changed_listener(const zmk_event_t *eh) {
+    const struct zmk_keycode_state_changed *ev = as_zmk_keycode_state_changed(eh);
     if (ev == NULL) {
         return ZMK_EV_EVENT_BUBBLE;
     }
-    send_modifier_state();
+
+    /* After every keycode event, check current modifier state.
+     * Only send if it changed from what we last reported. */
+    uint8_t mods = (uint8_t)zmk_hid_get_explicit_mods();
+    if (mods != last_sent_mods) {
+        last_sent_mods = mods;
+        send_modifier_state(mods);
+    }
+
     return ZMK_EV_EVENT_BUBBLE;
 }
 
-ZMK_LISTENER(modifier_notifier, modifiers_state_changed_listener);
-ZMK_SUBSCRIPTION(modifier_notifier, zmk_modifiers_state_changed);
+ZMK_LISTENER(modifier_notifier, keycode_state_changed_listener);
+ZMK_SUBSCRIPTION(modifier_notifier, zmk_keycode_state_changed);
