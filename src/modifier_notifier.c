@@ -17,16 +17,10 @@
  * The bitmask layout matches the standard USB HID keyboard modifier byte,
  * so left and right variants are preserved.
  *
- * Note: this sends a snapshot of the CURRENT explicit modifier state on each
- * change, not a delta. The host script can render directly from this byte
- * with no state tracking.
- *
- * Sticky / one-shot modifiers: when a sticky modifier engages, it appears in
- * the explicit modifier mask just like a regular held modifier, so it will
- * be reflected here. The host cannot distinguish "shift is held" from
- * "shift is sticky-pending" from this packet alone -- that would require a
- * more invasive integration with the sticky-key behavior. Left as future
- * work; for most indicator use cases the bitmask is sufficient.
+ * NOTE: raise_raw_hid_sent_event is processed asynchronously by the raw_hid
+ * adapter, so the data pointer must remain valid after this function returns.
+ * The buffer is file-scope static (NOT stack-local) for this reason. The
+ * keypeek module does the same thing for the same reason.
  */
 
 #include <zmk/event_manager.h>
@@ -44,20 +38,23 @@ LOG_MODULE_DECLARE(zmk, CONFIG_ZMK_LOG_LEVEL);
 
 #define MODNOTIF_PACKET_MARKER 0xF2
 
-static void send_modifier_state(void) {
-    uint8_t buf[CONFIG_RAW_HID_REPORT_SIZE] = {0};
+/* File-scope buffer — must persist after send_modifier_state returns because
+ * raise_raw_hid_sent_event is consumed asynchronously by the raw_hid adapter. */
+static uint8_t hid_buf[CONFIG_RAW_HID_REPORT_SIZE];
 
+static void send_modifier_state(void) {
     /* zmk_hid_get_explicit_mods() returns the standard USB HID modifier byte
      * with handedness preserved. */
     zmk_mod_flags_t mods = zmk_hid_get_explicit_mods();
 
-    buf[0] = MODNOTIF_PACKET_MARKER;
-    buf[1] = 1;
-    buf[2] = (uint8_t)mods;
+    memset(hid_buf, 0, sizeof(hid_buf));
+    hid_buf[0] = MODNOTIF_PACKET_MARKER;
+    hid_buf[1] = 1;
+    hid_buf[2] = (uint8_t)mods;
 
     LOG_DBG("Modifier notifier: mods=0x%02x", mods);
 
-    raise_raw_hid_sent_event((struct raw_hid_sent_event){.data = buf, .length = sizeof(buf)});
+    raise_raw_hid_sent_event((struct raw_hid_sent_event){.data = hid_buf, .length = sizeof(hid_buf)});
 }
 
 static int modifiers_state_changed_listener(const zmk_event_t *eh) {
